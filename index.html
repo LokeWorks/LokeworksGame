@@ -386,7 +386,7 @@
 
   B(0, 22, 6, 6, 1.5, 0); B(0, 31, 6, 6, 2.6, 1); B(0, 40, 6, 6, 3.6, 2);        // hopping stones
   R(-16, 14, 8, 14, 4, 0, 3); B(-16, 28, 8, 14, 4, 4); R(-16, 42, 8, 14, 4, Math.PI, 5);   // ramp over a platform
-  B(16, -10, 5, 4, 1.2, 0); B(16, -14, 5, 4, 2.4, 1); B(16, -18, 5, 4, 3.6, 2); B(16, -25, 10, 8, 3.6, 3);  // stairs
+  B(16, -10, 5, 4, 1.2, 0); B(16, -14, 5, 4, 2.4, 1); B(16, -18, 5, 4, 3.6, 2); B(16, -24, 10, 8, 3.6, 3);  // stairs
   R(28, 0, 8, 10, 3, Math.PI / 2, 4); B(38, 0, 10, 10, 3, 5);                     // side ramp
   B(-8, -20, 4, 4, 1, 1); B(-14, -26, 4, 4, 2, 2); B(-20, -32, 4, 4, 3, 3);       // zig-zag stones
   // wall-run / wall-slide walls (tagged so only these count as slidable)
@@ -394,10 +394,18 @@
   W(-6, -60, 2, 34, 18, 3); W(6, -60, 2, 34, 18, 4);          // wall-jump canyon, jump between the two
   W(30, 36, 2, 26, 14, 1);  W(-44, 0, 26, 2, 14, 5);          // free-standing slide walls
   W(50, -40, 2, 30, 20, 0); W(62, -40, 2, 30, 20, 2);         // second canyon, taller
+  function solidHalf(sd) { var sw = Math.abs(sd.s) > 0.5; return { hx: (sw ? sd.d : sd.w) / 2, hz: (sw ? sd.w : sd.d) / 2 }; }
   for (var si = 0; si < 16; si++) {
-    var bx, bz;
-    do { bx = (rnd() - 0.5) * 220; bz = (rnd() - 0.5) * 220; } while (bx > -32 && bx < 46 && bz > -38 && bz < 52);
-    B(bx, bz, 2 + rnd() * 4, 2 + rnd() * 4, 1 + rnd() * 3, si + 2);
+    var bx, bz, bw, bd, bh, tries = 0, okPlace;
+    do {
+      bx = (rnd() - 0.5) * 220; bz = (rnd() - 0.5) * 220; bw = 2 + rnd() * 4; bd = 2 + rnd() * 4; bh = 1 + rnd() * 3;
+      okPlace = !(bx > -32 && bx < 46 && bz > -38 && bz < 52);
+      for (var oi = 0; okPlace && oi < solids.length; oi++) {          // never overlap a wall, ramp or another box
+        var os = solids[oi], oh = solidHalf(os);
+        if (Math.abs(bx - os.x) < oh.hx + bw / 2 + 3 && Math.abs(bz - os.z) < oh.hz + bd / 2 + 3) okPlace = false;
+      }
+    } while (!okPlace && ++tries < 300);
+    if (okPlace) B(bx, bz, bw, bd, bh, si + 2);
   }
 
   function localOf(sd, px, pz) {
@@ -414,7 +422,7 @@
       var sd = solids[i], l = localOf(sd, px, pz);
       if (Math.abs(l[0]) <= sd.w / 2 + 0.3 && Math.abs(l[1]) <= sd.d / 2 + 0.3) {
         var hh = heightAt(sd, clamp(l[1], -sd.d / 2, sd.d / 2));
-        if (hh > best && fy >= hh - STEP) {
+        if (hh > best && fy >= hh - STEP - (sd.ramp ? 0.5 * sd.h / sd.d : 0)) {   // ramps: allow for the slope rising under a fast step
           best = hh; GN.x = 0; GN.y = 1; GN.z = 0;
           if (sd.ramp) { var nzl = -sd.h / sd.d, nl = Math.sqrt(1 + nzl * nzl); GN.x = nzl * sd.s / nl; GN.y = 1 / nl; GN.z = nzl * sd.c / nl; }
         }
@@ -424,10 +432,12 @@
   }
 
   // Push him out of anything whose side he is too low to step onto
-  function pushOut(p, vel) {
+  var PUSH_STEP = 0.35;
+  function pushOut(p, vel, oy) {
+    if (oy === undefined) oy = p.y;
     for (var i = 0; i < solids.length; i++) {
       var sd = solids[i], l = localOf(sd, p.x, p.z), hx = sd.w / 2 + RAD, hz = sd.d / 2 + RAD;
-      if (Math.abs(l[0]) < hx && Math.abs(l[1]) < hz && p.y < heightAt(sd, clamp(l[1], -sd.d / 2, sd.d / 2)) - STEP) {
+      if (Math.abs(l[0]) < hx && Math.abs(l[1]) < hz && oy < heightAt(sd, clamp(l[1], -sd.d / 2, sd.d / 2)) - PUSH_STEP - (sd.ramp ? 0.5 * sd.h / sd.d : 0)) {   // PUSH_STEP: a ramp is still ~0.26 short of the platform at the point the body touches its edge
         var nlx = 0, nlz = 0;
         if (hx - Math.abs(l[0]) < hz - Math.abs(l[1])) { nlx = l[0] < 0 ? -1 : 1; l[0] = nlx * hx; }
         else { nlz = l[1] < 0 ? -1 : 1; l[1] = nlz * hz; }
@@ -902,9 +912,11 @@
     vel.x += F.x * im * dt; vy += F.y * im * dt; vel.z += F.z * im * dt;
     F.x = F.y = F.z = 0;
     vy -= UNITY.gravity * dt;
+    var oy = P.y;                                   // height before this step: lets a fast fall land ON a top instead of being shoved off its side
     P.x = clamp(P.x + vel.x * dt, -LIMIT, LIMIT); P.z = clamp(P.z + vel.z * dt, -LIMIT, LIMIT); P.y += vy * dt;
-    pushOut(P, vel);
-    var gy = groundAt(P.x, P.z, P.y);
+    pushOut(P, vel, oy);
+    var gy = groundAt(P.x, P.z, vy < 0 ? Math.max(P.y, oy) : P.y);
+    if (P.y > gy && grounded && vy <= 0 && GN.y < 0.999 && P.y - gy < 0.4) P.y = gy;   // running down a ramp: stick to it instead of hopping
     if (P.y <= gy) {                                // OnCollisionStay on a floor (normal < maxSlopeAngle)
       if (vy < 0) {
         var hit = -vy;
