@@ -40,6 +40,10 @@
   #toast { position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 18px); transform: translateX(-50%); padding: 10px 18px;
     border-radius: 999px; background: var(--pill-bg); border: 1.5px solid var(--pill-border); font-weight: 500; opacity: 0; pointer-events: none; transition: opacity .25s; white-space: nowrap; }
   #toast.on { opacity: 1; }
+  #tagHud { position: fixed; left: 50%; top: calc(env(safe-area-inset-top, 0px) + 64px); transform: translateX(-50%); padding: 8px 18px; border-radius: 999px;
+    font-weight: 600; color: #fff; background: rgba(23,50,74,.78); display: none; pointer-events: none; white-space: nowrap; }
+  #tagHud.on { display: block; }
+  #tagHud.it { background: #e5383b; box-shadow: 0 0 18px rgba(229,56,59,.8); }
   body.stream header, body.stream .bar { display: none; }
   body.stream #stage { cursor: none; }
   #fallback { display: none; position: fixed; inset: 0; align-items: center; justify-content: center; padding: 32px; text-align: center; font-size: 1.1rem; }
@@ -49,7 +53,17 @@
 <canvas id="stage" tabindex="0" role="img" aria-label="Loke's noob character in a 3D playground. WASD to move, Space to jump, drag to look, scroll to zoom."></canvas>
 <header>
   <h1>Loke's Noob</h1>
-  <p id="hint">WASD or arrows to move · Space to jump · 1-0 to dance · ` to clone yourself · drag to look · scroll to zoom · M for mic</p>
+  <div id="mp" style="pointer-events:auto;cursor:default;position:fixed;top:10px;right:10px;z-index:20;background:rgba(20,20,30,.72);color:#fff;font:600 12px system-ui,sans-serif;padding:8px 10px;border-radius:10px;width:200px;user-select:none">
+  <div style="margin-bottom:6px">Multiplayer</div>
+  <div style="display:flex;gap:4px;align-items:center">
+    <button id="mphost" type="button" style="min-height:0;padding:4px 8px;font-size:12px">Host</button>
+    <input id="mpcode" maxlength="4" placeholder="CODE" autocomplete="off" style="width:54px;text-transform:uppercase;font:inherit;padding:3px 4px;border-radius:6px;border:0">
+    <button id="mpjoin" type="button" style="min-height:0;padding:4px 8px;font-size:12px">Join</button>
+  </div>
+  <div id="mpstat" style="margin-top:6px;font-weight:500">Offline</div>
+  <div style="font-weight:500;opacity:.75;margin-top:4px">Mouse locked? Press Esc to use this panel.</div>
+</div>
+<p id="hint">Click to capture mouse · WASD move · hold Space to jump (also off walls) · slide down tall walls in the air · Ctrl or C crouch/slide · 1-0 to dance · ` to clone yourself · multiplayer: tag, red outline = it · drag to look · scroll to zoom · M for mic</p>
 </header>
 <div class="bar">
   <button id="reset" type="button">Reset view</button>
@@ -59,9 +73,11 @@
   <button id="rec" type="button" aria-pressed="false" title="Record video (R)">Record</button>
 </div>
 <div id="toast" role="status"></div>
+<div id="tagHud" role="status"></div>
 <div id="fallback">Your browser could not start 3D graphics (WebGL). Try a different browser or device.</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
 <script>
 (function () {
   var canvas = document.getElementById('stage');
@@ -128,6 +144,11 @@
 
   var OUTLINE_T = 0.12;                    // outline thickness, in model units
   var outlineMat = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide });
+  var outlineRed = new THREE.MeshBasicMaterial({ color: 0xff1a1a, side: THREE.BackSide });   // outline of whoever is tagged
+  var TAG = { id: null, me: false, until: 0 };
+  function setOutline(g, on) {
+    g.traverse(function (o) { if (o.userData && o.userData.outline) o.material = on ? outlineRed : outlineMat; });
+  }
 
   // Inverted hull: copy of the mesh pushed out along its smoothed normals, drawn back-faces only
   function outlineGeometry(geo, t) {
@@ -175,6 +196,7 @@
     geo.setIndex(all);
     var mesh = new THREE.Mesh(geo, mats);
     var line = new THREE.Mesh(outlineGeometry(geo, OUTLINE_T), outlineMat);
+    line.userData.outline = true;
     if (offset) { mesh.position.copy(offset); line.position.copy(offset); }
     parent.add(line);
     parent.add(mesh);
@@ -250,7 +272,7 @@
   function nodeAt(root, pa) { var n = root; pa.forEach(function (i) { n = n.children[i]; }); return n; }
   var clonePaths = [armL, armR, legL, legR, headG].map(pathTo);
   function makeClone() {
-    var o = noob.clone(true); o.rotation.order = 'YXZ'; o.visible = false; o.scale.setScalar(0.001); scene.add(o);
+    var o = noob.clone(true); o.rotation.order = 'YXZ'; o.visible = false; o.scale.setScalar(0.001); scene.add(o); setOutline(o, TAG.me);
     return { obj: o, n: clonePaths.map(function (pa) { return nodeAt(o, pa); }), sp: { x: 0, v: 0 }, on: false };
   }
   function poseClone(c, sn, x, y, z, yaw, sc) {
@@ -277,7 +299,7 @@
 
   // ================= Game =================
   var FACE_OFFSET = 0;                    // set to Math.PI if he walks backwards
-  var GRAV = 42, JUMP_V = 19, RUN = 12, RAD = 0.9, STEP = 0.7, LIMIT = 280;
+  var GRAV = 42, JUMP_V = 19, RUN = 12, RAD = 0.9, STEP = 0.1, LIMIT = 280;
   noob.rotation.order = 'YXZ';
   var $ = function (id) { return document.getElementById(id); };
   var hint = $('hint');
@@ -367,6 +389,11 @@
   B(16, -10, 5, 4, 1.2, 0); B(16, -14, 5, 4, 2.4, 1); B(16, -18, 5, 4, 3.6, 2); B(16, -25, 10, 8, 3.6, 3);  // stairs
   R(28, 0, 8, 10, 3, Math.PI / 2, 4); B(38, 0, 10, 10, 3, 5);                     // side ramp
   B(-8, -20, 4, 4, 1, 1); B(-14, -26, 4, 4, 2, 2); B(-20, -32, 4, 4, 3, 3);       // zig-zag stones
+  // wall-run / wall-slide walls (tagged so only these count as slidable)
+  var W = function (x, z, w, d, h, i) { B(x, z, w, d, h, i); solids[solids.length - 1].wall = true; };
+  W(-6, -60, 2, 34, 18, 3); W(6, -60, 2, 34, 18, 4);          // wall-jump canyon, jump between the two
+  W(30, 36, 2, 26, 14, 1);  W(-44, 0, 26, 2, 14, 5);          // free-standing slide walls
+  W(50, -40, 2, 30, 20, 0); W(62, -40, 2, 30, 20, 2);         // second canyon, taller
   for (var si = 0; si < 16; si++) {
     var bx, bz;
     do { bx = (rnd() - 0.5) * 220; bz = (rnd() - 0.5) * 220; } while (bx > -32 && bx < 46 && bz > -38 && bz < 52);
@@ -380,13 +407,17 @@
   function heightAt(sd, lz) { return sd.ramp ? sd.h * clamp((lz + sd.d / 2) / sd.d, 0, 1) : sd.h; }
 
   // Highest surface under (px, pz) that feet at height fy can stand on
+  var GN = { x: 0, y: 1, z: 0 };
   function groundAt(px, pz, fy) {
-    var best = 0;
+    var best = 0; GN.x = 0; GN.y = 1; GN.z = 0;
     for (var i = 0; i < solids.length; i++) {
       var sd = solids[i], l = localOf(sd, px, pz);
       if (Math.abs(l[0]) <= sd.w / 2 + 0.3 && Math.abs(l[1]) <= sd.d / 2 + 0.3) {
         var hh = heightAt(sd, clamp(l[1], -sd.d / 2, sd.d / 2));
-        if (hh > best && fy >= hh - STEP) best = hh;
+        if (hh > best && fy >= hh - STEP) {
+          best = hh; GN.x = 0; GN.y = 1; GN.z = 0;
+          if (sd.ramp) { var nzl = -sd.h / sd.d, nl = Math.sqrt(1 + nzl * nzl); GN.x = nzl * sd.s / nl; GN.y = 1 / nl; GN.z = nzl * sd.c / nl; }
+        }
       }
     }
     return best;
@@ -397,11 +428,13 @@
     for (var i = 0; i < solids.length; i++) {
       var sd = solids[i], l = localOf(sd, p.x, p.z), hx = sd.w / 2 + RAD, hz = sd.d / 2 + RAD;
       if (Math.abs(l[0]) < hx && Math.abs(l[1]) < hz && p.y < heightAt(sd, clamp(l[1], -sd.d / 2, sd.d / 2)) - STEP) {
-        if (hx - Math.abs(l[0]) < hz - Math.abs(l[1])) l[0] = (l[0] < 0 ? -1 : 1) * hx;
-        else l[1] = (l[1] < 0 ? -1 : 1) * hz;
+        var nlx = 0, nlz = 0;
+        if (hx - Math.abs(l[0]) < hz - Math.abs(l[1])) { nlx = l[0] < 0 ? -1 : 1; l[0] = nlx * hx; }
+        else { nlz = l[1] < 0 ? -1 : 1; l[1] = nlz * hz; }
         p.x = sd.x + l[0] * sd.c + l[1] * sd.s;
         p.z = sd.z - l[0] * sd.s + l[1] * sd.c;
-        vel.x *= 0.5; vel.z *= 0.5;
+        var nwx = nlx * sd.c + nlz * sd.s, nwz = -nlx * sd.s + nlz * sd.c, vn = vel.x * nwx + vel.z * nwz;
+        if (vn < 0) { vel.x -= nwx * vn; vel.z -= nwz * vn; }
       }
     }
   }
@@ -420,6 +453,17 @@
   var D = { yaw: 0, spin: 0, hop: 0, hx: 0, hz: 0, tilt: 0 }, dSm = { hx: 0, hz: 0, hop: 0, tilt: 0 };
   var DANCES = ['', 'Stupid Dance', 'Disco', 'Spin', 'Robot', 'Jumping Jacks', 'Sprinkler', 'Rock Out', 'Twist', 'Rage Quit', 'Hype Train'];
   var holdT = 0, holdDepth = 0, landT = 0, acc = { x: 0, z: 0 }, prevVel = { x: 0, z: 0 };
+
+  // ===== PlayerMovement.cs, 1:1 =====
+  // Script values, copied as-is:
+  var SCRIPT = { moveSpeed: 4500, maxSpeed: 20, counterMovement: 0.175, threshold: 0.01, slideForce: 400,
+                 slideCounterMovement: 0.2, jumpCooldown: 0.25, jumpForce: 550 };
+  // Values that live in the Unity scene / Rigidbody, not in the script (Unity defaults). If your Rigidbody has
+  // a different Mass or your Physics gravity is not -9.81, change them here - jump height depends on both.
+  var UNITY = { fixedDt: 0.02, mass: 1, gravity: 18.1 };   // jump apex = 22^2 / (2*gravity): 9.81 gives ~25 units, 50 gives ~4.8
+  var crouching = false, readyToJump = true, fpv = true, JUMPING = false, JUMPED = false;
+  var WALL = { x: 0, z: 0, t: -9 }, wallSliding = false, WSLIDE = 5, fixAcc = 0, stepTime = 0, jumpResetAt = 0, stopGroundAt = 0;
+  var INP = { x: 0, y: 0 }, LOOK = { fx: 0, fz: 1, rx: -1, rz: 0 }, RBF = { x: 0, y: 0, z: 0 }, NORMAL = { x: 0, y: 1, z: 0 };
 
   // Springs (squishiness and jiggle)
   function spring(o, target, k, c, dt) { o.v += (k * (target - o.x) - c * o.v) * dt; o.x += o.v * dt; }
@@ -521,6 +565,10 @@
       t.lLx = Math.sin(fallPhase * 0.9) * 0.6 * pn; t.lRx = -t.lLx;
       t.lLz = -0.12; t.lRz = 0.12;
     }
+    if (crouching && !danceId) {
+      t.sy *= 0.5; t.sx *= 1.08; t.lLz = -0.12; t.lRz = 0.12;
+      if (grounded && speed > 3) { t.aLx = t.aRx = -1.0; t.lLx = 0.5; t.lRx = -0.1; }
+    }
     return t;
   }
 
@@ -529,7 +577,7 @@
   var yaw = 0.0, pitch = 0.32, zoom = 1, DEF = { pitch: 0.32, zoom: 1 };
   var dismissed = false;
   function touched() { if (!dismissed) { dismissed = true; hint.classList.add('gone'); } }
-  function clampPitch() { pitch = clamp(pitch, -0.15, 1.45); }
+  function clampPitch() { pitch = fpv ? clamp(pitch, -Math.PI / 2, Math.PI / 2) : clamp(pitch, -0.15, 1.45); }
   function clampZoom() { zoom = clamp(zoom, 0.3, 3); }
 
   window.addEventListener('keydown', function (e) {
@@ -558,6 +606,16 @@
 
   var pointers = new Map(), pinchStart = 0, zoomStart = 1;
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  var downX = 0, downY = 0, MOUSE_RAD = 0.1 * Math.PI / 180;       // Look(): 0.1 degrees per pixel
+  canvas.addEventListener('pointerdown', function (e) { downX = e.clientX; downY = e.clientY; });
+  canvas.addEventListener('click', function (e) {
+    if (document.pointerLockElement || !canvas.requestPointerLock || !window.matchMedia('(pointer:fine)').matches) return;
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) < 5) { try { canvas.requestPointerLock(); } catch (err) {} }
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (document.pointerLockElement !== canvas) return;
+    yaw -= e.movementX * MOUSE_RAD; pitch += e.movementY * MOUSE_RAD; clampPitch(); touched();
+  });
   canvas.addEventListener('pointerdown', function (e) {
     canvas.focus(); canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY }); touched();
@@ -669,9 +727,16 @@
   fit();
 
   function place() {
-    var d = 16 * zoom, cp = Math.cos(pitch);
-    camera.position.set(camT.x + d * Math.sin(yaw) * cp, Math.max(0.5, camT.y + d * Math.sin(pitch)), camT.z + d * Math.cos(yaw) * cp);
-    camera.lookAt(camT);
+    noob.visible = !fpv;
+    if (fpv) {
+      var ey = P.y + 3.45 * noob.scale.y, cpf = Math.cos(pitch);
+      camera.position.set(P.x, ey, P.z);
+      camera.lookAt(P.x - Math.sin(yaw) * cpf, ey - Math.sin(pitch), P.z - Math.cos(yaw) * cpf);
+    } else {
+      var d = 16 * zoom, cp = Math.cos(pitch);
+      camera.position.set(camT.x + d * Math.sin(yaw) * cp, Math.max(0.5, camT.y + d * Math.sin(pitch)), camT.z + d * Math.cos(yaw) * cp);
+      camera.lookAt(camT);
+    }
     sky.position.copy(camera.position);
     sunSprite.position.copy(camera.position).addScaledVector(sunDir, 700);
   }
@@ -812,6 +877,120 @@
     if (key !== faceKey) { faceKey = key; drawFace(); headTex.needsUpdate = true; }
   }
 
+  // ---------- PlayerMovement.cs port: FixedUpdate at 50 Hz ----------
+  function deltaAngle(a, b) {
+    var d = (b - a) % (2 * Math.PI);
+    if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI;
+    return d;
+  }
+  function startCrouch() {                          // StartCrouch(): scale 0.5, slide force if moving on the ground
+    var m3 = Math.sqrt(vel.x * vel.x + vy * vy + vel.z * vel.z);
+    if (m3 > 0.5 && grounded) { RBF.x += LOOK.fx * SCRIPT.slideForce; RBF.z += LOOK.fz * SCRIPT.slideForce; }
+  }
+  function jump() {                                 // Jump()
+    var S = SCRIPT;
+    if (!(grounded && readyToJump)) return;
+    readyToJump = false;
+    RBF.y += S.jumpForce * 1.5;                     // AddForce(Vector2.up * jumpForce * 1.5)
+    RBF.x += NORMAL.x * S.jumpForce * 0.5; RBF.y += NORMAL.y * S.jumpForce * 0.5; RBF.z += NORMAL.z * S.jumpForce * 0.5;
+    if (vy < 0.5) vy = 0; else if (vy > 0) vy = vy / 2;
+    jumpResetAt = stepTime + S.jumpCooldown;        // Invoke(ResetJump, jumpCooldown)
+    JUMPED = true;
+  }
+  function physicsStep(dt) {                        // what PhysX does after FixedUpdate: Force mode, gravity, collisions
+    var F = RBF, im = 1 / UNITY.mass;
+    vel.x += F.x * im * dt; vy += F.y * im * dt; vel.z += F.z * im * dt;
+    F.x = F.y = F.z = 0;
+    vy -= UNITY.gravity * dt;
+    P.x = clamp(P.x + vel.x * dt, -LIMIT, LIMIT); P.z = clamp(P.z + vel.z * dt, -LIMIT, LIMIT); P.y += vy * dt;
+    pushOut(P, vel);
+    var gy = groundAt(P.x, P.z, P.y);
+    if (P.y <= gy) {                                // OnCollisionStay on a floor (normal < maxSlopeAngle)
+      if (vy < 0) {
+        var hit = -vy;
+        if (hit > 5) { holdDepth = Math.min(0.55, hit * 0.026); sq.x = -holdDepth * 0.2; sq.v = 0; holdT = 0.15; lean.v -= hit * 0.004; hdX.v += hit * 0.03; landT = 0.2; }
+        vy = 0;
+      }
+      P.y = gy;
+      grounded = true; NORMAL.x = GN.x; NORMAL.y = GN.y; NORMAL.z = GN.z;
+      stopGroundAt = stepTime + UNITY.fixedDt * 3;  // CancelInvoke + Invoke(StopGrounded, deltaTime * 3)
+    }
+    // wall contact: within 0.25 of the side of a wall solid
+    for (var wi = 0; wi < solids.length; wi++) {
+      var sw = solids[wi]; if (!sw.wall) continue;
+      var lw = localOf(sw, P.x, P.z), hxw = sw.w / 2 + RAD + 0.25, hzw = sw.d / 2 + RAD + 0.25;
+      if (Math.abs(lw[0]) < hxw && Math.abs(lw[1]) < hzw && P.y < sw.h - 0.3 && P.y > 0.1) {
+        var nlx2 = 0, nlz2 = 0;
+        if (hxw - Math.abs(lw[0]) < hzw - Math.abs(lw[1])) nlx2 = lw[0] < 0 ? -1 : 1; else nlz2 = lw[1] < 0 ? -1 : 1;
+        WALL.x = nlx2 * sw.c + nlz2 * sw.s; WALL.z = -nlx2 * sw.s + nlz2 * sw.c; WALL.t = stepTime;
+      }
+    }
+    // wall slide: airborne, touching a wall, pushing a movement key -> fall speed capped, horizontal drag
+    wallSliding = !grounded && stepTime - WALL.t < 0.08 && (INP.x !== 0 || INP.y !== 0);
+    if (wallSliding && vy < -WSLIDE) vy = -WSLIDE;
+    if (wallSliding) { var dg = Math.max(0, 1 - 2 * dt); vel.x *= dg; vel.z *= dg; }
+  }
+  function fixedStep(dt) {                          // FixedUpdate() -> Movement()
+    var S = SCRIPT, F = RBF, L = LOOK;
+    stepTime += dt;
+    if (stopGroundAt && stepTime >= stopGroundAt) { grounded = false; stopGroundAt = 0; }
+    if (jumpResetAt && stepTime >= jumpResetAt) { readyToJump = true; jumpResetAt = 0; }
+    var x = INP.x, y = INP.y;
+
+    F.y -= dt * 10;                                 // extra gravity
+
+    // FindVelRelativeToLook()
+    var hs = Math.hypot(vel.x, vel.z), m3 = Math.sqrt(hs * hs + vy * vy), u;
+    if (hs > 0) u = Math.atan2(vel.x * L.rx + vel.z * L.rz, vel.x * L.fx + vel.z * L.fz);
+    else u = deltaAngle(Math.atan2(-L.fx, L.fz), 0);
+    var xMag = m3 * Math.cos(Math.PI / 2 - u), yMag = m3 * Math.cos(u);
+
+    // CounterMovement(x, y, mag)
+    if (grounded && !JUMPING) {
+      if (crouching) {
+        if (m3 > 0) { var ks = S.moveSpeed * dt * S.slideCounterMovement / m3; F.x -= vel.x * ks; F.y -= vy * ks; F.z -= vel.z * ks; }
+      } else {
+        var th = S.threshold;
+        if ((Math.abs(xMag) > th && Math.abs(x) < 0.05) || (xMag < -th && x > 0) || (xMag > th && x < 0)) {
+          var kx = S.moveSpeed * dt * -xMag * S.counterMovement; F.x += L.rx * kx; F.z += L.rz * kx;
+        }
+        if ((Math.abs(yMag) > th && Math.abs(y) < 0.05) || (yMag < -th && y > 0) || (yMag > th && y < 0)) {
+          var ky = S.moveSpeed * dt * -yMag * S.counterMovement; F.x += L.fx * ky; F.z += L.fz * ky;
+        }
+        if (hs > S.maxSpeed) {                      // limit diagonal running (velocity.normalized * maxSpeed, y kept)
+          vel.x = vel.x / m3 * S.maxSpeed; vel.z = vel.z / m3 * S.maxSpeed;
+        }
+      }
+    }
+
+    if (readyToJump && JUMPING) {
+      if (grounded) jump();
+      else if (wallSliding) {                        // wall jump: up like a normal jump, kick away from the wall
+        readyToJump = false; vy = 0;
+        F.y += S.jumpForce * 2; F.x += WALL.x * S.jumpForce * 1.2; F.z += WALL.z * S.jumpForce * 1.2;
+        jumpResetAt = stepTime + S.jumpCooldown; JUMPED = true; wallSliding = false;
+      }
+    }
+
+    if (crouching && grounded && readyToJump) {     // sliding: push down, no input forces
+      F.y -= dt * 3000;
+      physicsStep(dt); return;
+    }
+
+    if (x > 0 && xMag > S.maxSpeed) x = 0;
+    if (x < 0 && xMag < -S.maxSpeed) x = 0;
+    if (y > 0 && yMag > S.maxSpeed) y = 0;
+    if (y < 0 && yMag < -S.maxSpeed) y = 0;
+    INP.x = x; INP.y = y;                           // x, y are fields in the C#, so this sticks until the next Update
+
+    var mult = 1, multV = 1;
+    if (!grounded) { mult = 0.5; multV = 0.5; }
+    if (grounded && crouching) multV = 0;
+    var kf = y * S.moveSpeed * dt * mult * multV, kr = x * S.moveSpeed * dt * mult;
+    F.x += L.fx * kf + L.rx * kr; F.z += L.fz * kf + L.rz * kr;
+    physicsStep(dt);
+  }
+
   // ---------- Frame update ----------
   function update(dt) {
     faceTick(dt);
@@ -827,37 +1006,29 @@
     if (hasIn) { dx /= len; dz /= len; }
 
     if (danceId && (hasIn || jumpBuf > 0 || !grounded)) danceId = 0;
-    var rate = hasIn ? (grounded ? 80 : 40) : (grounded ? 60 : 6);
-    var ex = (hasIn ? dx * RUN : 0) - vel.x, ez = (hasIn ? dz * RUN : 0) - vel.z, el = Math.hypot(ex, ez);
-    if (el > 0) { var st = Math.min(el, rate * dt) / el; vel.x += ex * st; vel.z += ez * st; }
+    // FixedUpdate steps first (they use last frame's input and orientation, like Unity), then Update()
+    fixAcc += dt;
+    var nSteps = 0;
+    while (fixAcc >= UNITY.fixedDt && nSteps < 6) { fixAcc -= UNITY.fixedDt; nSteps++; fixedStep(UNITY.fixedDt); }
+    if (nSteps >= 6) fixAcc = 0;
+
+    // Update(): MyInput() then Look()
+    INP.x = mx; INP.y = mz;                         // GetAxisRaw, not normalised
+    JUMPING = !!keys.Space;
+    var crNow = !!(keys.ControlLeft || keys.KeyC);
+    if (crNow && !crouching) startCrouch();
+    crouching = crNow;
+    LOOK.fx = fx; LOOK.fz = fz; LOOK.rx = rx; LOOK.rz = rz;
+    jumpBuf -= dt;
+    var launched = JUMPED; JUMPED = false;
     var speed = Math.hypot(vel.x, vel.z);
 
     // face the way he moves
-    if (hasIn) {
-      var want = Math.atan2(dx, dz) + FACE_OFFSET, diff = Math.atan2(Math.sin(want - face), Math.cos(want - face));
+    if (hasIn || speed > 2) {
+      var want = Math.atan2(speed > 2 ? vel.x : dx, speed > 2 ? vel.z : dz) + FACE_OFFSET, diff = Math.atan2(Math.sin(want - face), Math.cos(want - face));
       face += diff * (1 - Math.exp(-dt * 16));
     }
-
-    P.x = clamp(P.x + vel.x * dt, -LIMIT, LIMIT); P.z = clamp(P.z + vel.z * dt, -LIMIT, LIMIT);
-    pushOut(P, vel);
-
-    // jump with a little leeway
-    coyote = grounded ? 0.1 : coyote - dt;
-    jumpBuf -= dt;
-    var launched = false;
-    if (jumpBuf > 0 && coyote > 0) { vy = JUMP_V; grounded = false; coyote = 0; jumpBuf = 0; launched = true; }
-
     var gy = groundAt(P.x, P.z, P.y);
-    if (grounded) {
-      if (P.y - gy <= 0.5) { P.y = gy; vy = 0; } else grounded = false;
-    }
-    if (!grounded) {
-      vy -= GRAV * dt; P.y += vy * dt;
-      if (P.y <= gy && vy <= 0 && !launched) {
-        var hit = -vy; P.y = gy; vy = 0; grounded = true;
-        if (hit > 5) { holdDepth = Math.min(0.55, hit * 0.026); sq.x = -holdDepth * 0.2; sq.v = 0; holdT = 0.15; lean.v -= hit * 0.004; hdX.v += hit * 0.03; landT = 0.2; }
-      }
-    }
 
     // squash and stretch
     if (launched) { sq.x = -0.08; sq.v = 0; }
@@ -958,16 +1129,186 @@
     }
   }
 
-  yaw = Math.PI;                              // camera starts behind him
+  yaw = Math.PI; if (fpv) pitch = 0;                              // camera starts behind him
   var last = performance.now();
   function tick() {
     var now = performance.now(), dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     update(dt);
+    mpTick(dt);
+    tagTick(dt);
     place();
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
   }
+  // ---------- Tag ----------
+  // The host decides who is "it". Whoever is "it" gets a red pulsing outline and a red arrow over their head.
+  // Touch someone and the tag jumps to them (short cooldown so it can't bounce straight back).
+  var TAG_RANGE = 2.0, TAG_COOLDOWN = 1.5, claimT = 0;
+  var tagHud = $('tagHud');
+  var tagMarker = new THREE.Group();
+  (function () {
+    var inner = new THREE.Group(); inner.rotation.x = Math.PI;      // cone points down at the player
+    var cone = new THREE.Mesh(new THREE.ConeGeometry(0.42, 0.85, 4), new THREE.MeshBasicMaterial({ color: 0xff2020 }));
+    var edge = new THREE.Mesh(new THREE.ConeGeometry(0.42, 0.85, 4), outlineMat); edge.scale.setScalar(1.3);
+    inner.add(edge); inner.add(cone); tagMarker.add(inner);
+    tagMarker.visible = false; scene.add(tagMarker);
+  })();
+  function tagPlayers() { return ['host'].concat(Object.keys(MP.remotes)); }
+  function tagPos(id) { if (id === 'host') return { x: P.x, y: P.y, z: P.z }; var r = MP.remotes[id]; return r && r.init ? r : null; }
+  function applyTag(id, quiet) {
+    id = id || null;
+    var was = TAG.id, myId = MP.host ? 'host' : MP.myId;
+    if (id !== was) TAG.until = performance.now() + TAG_COOLDOWN * 1000;
+    TAG.id = id; TAG.me = !!id && id === myId;
+    setOutline(noob, TAG.me);
+    meClones.forEach(function (c) { setOutline(c.obj, TAG.me); });
+    hypeClones.forEach(function (c) { setOutline(c.obj, TAG.me); });
+    for (var k in MP.remotes) setOutline(MP.remotes[k].g, k === id);
+    tagMarker.visible = !!id;
+    tagHud.className = id ? (TAG.me ? 'on it' : 'on') : '';
+    tagHud.textContent = TAG.me ? "YOU'RE IT! Touch someone to tag them" : (id ? 'Run! Someone else is it' : '');
+    if (id && id !== was && !quiet) toast(TAG.me ? "You're it!" : 'Tag!', 1200);
+  }
+  function hostSetTag(id) {
+    applyTag(id);
+    var m = { t: 'tag', id: id || '' };
+    MP.conns.forEach(function (c) { if (c.open) c.send(m); });
+  }
+  function hostTagTick(dt) {
+    if (!MP.peer || !MP.host) return;
+    var ps = tagPlayers();
+    if (ps.length < 2) { if (TAG.id) hostSetTag(null); return; }          // nobody to chase
+    if (!TAG.id || ps.indexOf(TAG.id) < 0) { hostSetTag(ps[Math.floor(Math.random() * ps.length)]); return; }
+    if (performance.now() < TAG.until) return;
+    var it = tagPos(TAG.id); if (!it) return;
+    for (var i = 0; i < ps.length; i++) {
+      if (ps[i] === TAG.id) continue;
+      var o = tagPos(ps[i]); if (!o) continue;
+      if (Math.hypot(o.x - it.x, o.z - it.z) < TAG_RANGE && Math.abs(o.y - it.y) < 2.6) { hostSetTag(ps[i]); return; }
+    }
+  }
+  // A touch is also noticed by the players themselves and sent to the host, so it still works
+  // when the host's tab is in the background or the host sees the other player a bit late.
+  function hostClaim(id) {
+    if (!MP.host || !id || id === TAG.id || performance.now() < TAG.until) return;
+    if (tagPlayers().indexOf(id) < 0) return;
+    hostSetTag(id);
+  }
+  function near(x, y, z) { return Math.hypot(x - P.x, z - P.z) < TAG_RANGE && Math.abs(y - P.y) < 2.6; }
+  function clientTagTick() {
+    if (!MP.peer || !TAG.id) return;
+    var now = performance.now(); if (now < claimT || now < TAG.until) return;
+    var myId = MP.host ? 'host' : MP.myId, target = null, r, k;
+    if (TAG.me) { for (k in MP.remotes) { r = MP.remotes[k]; if (r.init && near(r.x, r.y, r.z)) { target = k; break; } } }
+    else { r = MP.remotes[TAG.id]; if (r && r.init && near(r.x, r.y, r.z)) target = myId; }
+    if (!target) return;
+    claimT = now + 300;
+    if (MP.host) hostClaim(target);
+    else if (MP.hostConn && MP.hostConn.open) MP.hostConn.send({ t: 'claim', id: target });
+  }
+  function tagTick(dt) {
+    hostTagTick(dt);
+    clientTagTick();
+    if (!TAG.id) return;
+    var tt = performance.now() / 1000, pu = 0.5 + 0.5 * Math.sin(tt * 7);
+    outlineRed.color.setRGB(0.7 + 0.3 * pu, 0.12 * pu, 0.12 * pu);
+    var src = null, show = true;
+    if (TAG.me) { src = noob.position; show = !fpv; }
+    else { var r = MP.remotes[TAG.id]; if (r) src = r.g.position; else show = false; }
+    tagMarker.visible = show && !!src;
+    if (tagMarker.visible) { tagMarker.position.set(src.x, src.y + 4.6 + Math.sin(tt * 4) * 0.2, src.z); tagMarker.rotation.y = tt * 2; }
+  }
+
+  // ---------- Basic multiplayer (PeerJS, host relays) ----------
+  var MP = { peer: null, host: false, conns: [], hostConn: null, remotes: {}, sendT: 0, myId: '' };
+  var mpStat = $('mpstat'), mpCode = $('mpcode');
+  function mpSay(t) { mpStat.textContent = t; }
+  function mpCount() { var n = 0; for (var k in MP.remotes) n++; return n; }
+  function mkRemote(id) {
+    var g = noob.clone(true); g.visible = true; scene.add(g); setOutline(g, id === TAG.id);
+    MP.remotes[id] = { g: g, x: 0, y: 0, z: 0, f: 0, c: 0, init: false };
+    return MP.remotes[id];
+  }
+  function dropRemote(id) { var r = MP.remotes[id]; if (r) { scene.remove(r.g); delete MP.remotes[id]; } }
+  function dropAll() { for (var k in MP.remotes) dropRemote(k); }
+  function mpOnData(conn, m) {
+    if (!m) return;
+    if (m.t === 's') {
+      if (MP.host) m.id = conn.peer;
+      var r = MP.remotes[m.id] || mkRemote(m.id);
+      r.x = m.x; r.y = m.y; r.z = m.z; r.f = m.f; r.c = m.c;
+      if (!r.init) { r.init = true; r.g.position.set(m.x, m.y, m.z); r.g.rotation.set(0, m.f, 0); }
+      if (MP.host) { MP.conns.forEach(function (c) { if (c !== conn && c.open) c.send(m); }); hostTagTick(0); }
+    } else if (m.t === 'l') dropRemote(m.id);
+    else if (m.t === 'tag' && !MP.host) applyTag(m.id);
+    else if (m.t === 'claim' && MP.host) hostClaim(m.id);
+  }
+  function mpHostStatus() { mpSay('Hosting ' + MP.code + ' · ' + (mpCount() + 1) + ' players'); }
+  function mpReset() {
+    try { if (MP.peer) MP.peer.destroy(); } catch (e) {}
+    dropAll(); MP.peer = null; MP.host = false; MP.conns = []; MP.hostConn = null; applyTag(null, true);
+  }
+  function mpHost(tries) {
+    if (typeof Peer === 'undefined') { mpSay('PeerJS failed to load'); return; }
+    mpReset();
+    var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', code = '';
+    for (var i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    MP.host = true; MP.code = code; mpSay('Starting...');
+    var peer = MP.peer = new Peer('noobfps-' + code);
+    peer.on('open', function () { mpHostStatus(); toast('Hosting ' + code, 2500); });
+    peer.on('error', function (err) {
+      if (err.type === 'unavailable-id' && (tries || 0) < 5) mpHost((tries || 0) + 1);
+      else mpSay('Error: ' + err.type);
+    });
+    peer.on('connection', function (conn) {
+      MP.conns.push(conn);
+      conn.on('open', function () { mpHostStatus(); conn.send({ t: 'tag', id: TAG.id || '' }); });
+      conn.on('data', function (m) { mpOnData(conn, m); });
+      conn.on('close', function () {
+        MP.conns = MP.conns.filter(function (c) { return c !== conn; });
+        dropRemote(conn.peer);
+        MP.conns.forEach(function (c) { if (c.open) c.send({ t: 'l', id: conn.peer }); });
+        mpHostStatus();
+      });
+    });
+  }
+  function mpJoin(code) {
+    if (typeof Peer === 'undefined') { mpSay('PeerJS failed to load'); return; }
+    code = (code || '').toUpperCase().trim(); if (code.length !== 4) { mpSay('Enter the 4-letter code'); return; }
+    mpReset(); mpSay('Connecting...');
+    var peer = MP.peer = new Peer();
+    peer.on('error', function (err) { mpSay(err.type === 'peer-unavailable' ? 'No room ' + code : 'Error: ' + err.type); });
+    peer.on('open', function (id) {
+      MP.myId = id;
+      var c = MP.hostConn = peer.connect('noobfps-' + code);
+      c.on('open', function () { mpSay('Joined ' + code); toast('Joined ' + code, 2000); });
+      c.on('data', function (m) { mpOnData(c, m); });
+      c.on('close', function () { dropAll(); MP.hostConn = null; applyTag(null, true); mpSay('Host left'); });
+    });
+  }
+  $('mphost').addEventListener('click', function () { mpHost(0); this.blur(); });
+  $('mpjoin').addEventListener('click', function () { mpJoin(mpCode.value); this.blur(); });
+  ['keydown', 'keyup'].forEach(function (n) { mpCode.addEventListener(n, function (e) { e.stopPropagation(); if (n === 'keydown' && e.key === 'Enter') mpJoin(mpCode.value); }); });
+  ['pointerdown', 'mousedown', 'touchstart', 'click'].forEach(function (n) { $('mp').addEventListener(n, function (e) { e.stopPropagation(); }); });
+  function mpTick(dt) {
+    if (!MP.peer) return;
+    MP.sendT -= dt;
+    if (MP.sendT <= 0) {
+      MP.sendT = 0.05;
+      var m = { t: 's', id: MP.host ? 'host' : MP.myId, x: P.x, y: P.y, z: P.z, f: face + FACE_OFFSET, c: crouching ? 1 : 0 };
+      if (MP.host) MP.conns.forEach(function (c) { if (c.open) c.send(m); });
+      else if (MP.hostConn && MP.hostConn.open) MP.hostConn.send(m);
+    }
+    var k = 1 - Math.exp(-dt * 16);
+    for (var id in MP.remotes) {
+      var r = MP.remotes[id], g = r.g;
+      g.position.x += (r.x - g.position.x) * k; g.position.y += (r.y - g.position.y) * k; g.position.z += (r.z - g.position.z) * k;
+      g.rotation.y += Math.atan2(Math.sin(r.f - g.rotation.y), Math.cos(r.f - g.rotation.y)) * k;
+      g.scale.y += ((r.c ? 0.55 : 1) - g.scale.y) * k; g.scale.x = g.scale.z = 1;
+    }
+  }
+
   canvas.focus();
   tick();
 })();
